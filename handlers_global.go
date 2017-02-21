@@ -35,6 +35,19 @@ func handleProxy(p *Proxy) http.Handler {
 	})
 }
 
+func handleSpans(p *Proxy) http.Handler {
+	return contextHandler(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+		span, traces, err := handleTraceRequest(ctx, p, w, r)
+
+		if err != nil {
+			return
+		}
+		// the server usually waits for this to return before finalizing the
+		// response, so this part must be done asynchronously
+		go p.ProxyTraces(span.Attach(ctx), traces)
+	})
+}
+
 // handleImport generates the handler that responds to POST requests submitting
 // metrics to the global veneur instance.
 func handleImport(s *Server) http.Handler {
@@ -48,6 +61,49 @@ func handleImport(s *Server) http.Handler {
 		// response, so this part must be done asynchronously
 		go s.ImportMetrics(span.Attach(ctx), jsonMetrics)
 	})
+}
+
+func handleTraceRequest(ctx context.Context, s VeneurServer, w http.ResponseWriter, r *http.Request) (*trace.Span, []DatadogTraceSpan, error) {
+	var (
+		traces []DatadogTraceSpan
+		err    error
+		span   *trace.Span
+	)
+
+	span, err = tracer.ExtractRequestChild("/spans", r, "veneur.opentracing.spans")
+	if err != nil {
+		log.WithError(err).Info("Could not extract span from request")
+		span = tracer.StartSpan("/spans", trace.NameTag("veneur.opentracing.spans")).(*trace.Span)
+	} else {
+		log.WithField("trace", span.Trace).Info("Extracted span from request")
+	}
+	defer span.Finish()
+
+	innerLogger := log.WithField("client", r.RemoteAddr)
+
+	if err = json.NewDecoder(r.Body).Decode(&traces); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		span.Error(err)
+		innerLogger.WithError(err).Error("Could not decode /spans request")
+		s.GetStats().Count("import.request_error_total", 1, []string{"cause:json"}, 1.0)
+		return nil, nil, err
+	}
+
+	if len(traces) == 0 {
+		const msg = "Received empty /spans request"
+		http.Error(w, msg, http.StatusBadRequest)
+		span.Error(errors.New(msg))
+		innerLogger.WithError(err).Error(msg)
+		return nil, nil, err
+	}
+
+	w.WriteHeader(http.StatusAccepted)
+	s.GetStats().TimeInMilliseconds("spans.response_duration_ns",
+		float64(time.Since(span.Start).Nanoseconds()),
+		[]string{"part:request"},
+		1.0)
+
+	return span, traces, nil
 }
 
 func handleRequest(ctx context.Context, s VeneurServer, w http.ResponseWriter, r *http.Request) (*trace.Span, []samplers.JSONMetric, error) {

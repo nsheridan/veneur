@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/pprof"
 	"os"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -236,6 +237,55 @@ func (p *Proxy) Handler() http.Handler {
 	mux.Handle(pat.Get("/debug/pprof/*"), http.HandlerFunc(pprof.Index))
 
 	return mux
+}
+
+func (p *Proxy) ProxyTraces(ctx context.Context, traces []DatadogTraceSpan) {
+	span, _ := trace.StartSpanFromContext(ctx, "veneur.opentracing.proxy.proxy_traces")
+	defer span.Finish()
+
+	tracesByDestination := make(map[string][]*DatadogTraceSpan)
+	for _, h := range p.TraceDestinations.Members() {
+		tracesByDestination[h] = make([]*DatadogTraceSpan, 0)
+	}
+
+	for _, t := range traces {
+		dest, _ := p.TraceDestinations.Get(strconv.FormatInt(t.TraceID, 10))
+		tracesByDestination[dest] = append(tracesByDestination[dest], &t)
+	}
+
+	for dest, batch := range tracesByDestination {
+
+		if len(batch) != 0 {
+			dnsStart := time.Now()
+			endpoint, err := resolveEndpoint(fmt.Sprintf("%s/spans", dest))
+			if err != nil {
+				// not a fatal error if we fail
+				// we'll just try to use the host as it was given to us
+				p.GetStats().Count("spans.error_total", 1, []string{"cause:dns"}, 1.0)
+				log.WithError(err).Warn("Could not re-resolve host for spans")
+			}
+			p.GetStats().TimeInMilliseconds("spans.duration_ns", float64(time.Since(dnsStart).Nanoseconds()), []string{"part:dns"}, 1.0)
+
+			// this endpoint is not documented to take an array... but it does
+			// another curious constraint of this endpoint is that it does not
+			// support "Content-Encoding: deflate"
+			err = postHelper(span.Attach(ctx), p, endpoint, batch, "flush_traces", false)
+
+			if err == nil {
+				log.WithFields(logrus.Fields{
+					"traces":      len(batch),
+					"destination": dest,
+				}).Info("Completed flushing traces to Datadog")
+			} else {
+				log.WithFields(
+					logrus.Fields{
+						"traces":        len(batch),
+						logrus.ErrorKey: err}).Error("Error flushing traces to Datadog")
+			}
+		} else {
+			log.WithField("destination", dest).Info("No traces to flush, skipping.")
+		}
+	}
 }
 
 // ProxyMetrics takes a sliceof JSONMetrics and breaks them up into multiple
