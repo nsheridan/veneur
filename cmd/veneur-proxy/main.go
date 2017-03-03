@@ -34,7 +34,7 @@ func main() {
 		logrus.WithError(err).Fatal("Could not initialize proxy")
 	}
 	defer func() {
-		veneur.ConsumePanic(&proxy, recover())
+		veneur.ConsumePanic(proxy.Sentry, proxy.Hostname, recover())
 	}()
 	proxy.Start()
 

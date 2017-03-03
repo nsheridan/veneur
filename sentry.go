@@ -10,15 +10,15 @@ import (
 // ConsumePanic is intended to be called inside a deferred function when recovering
 // from a panic. It accepts the value of recover() as its only argument,
 // and reports the panic to Sentry, prints the stack,  and then repanics (to ensure your program terminates)
-func ConsumePanic(s VeneurServer, err interface{}) {
+func ConsumePanic(sentry *raven.Client, hostname string, err interface{}) {
 	if err == nil {
 		return
 	}
 
-	if s.GetSentry() != nil {
+	if sentry != nil {
 		p := raven.Packet{
 			Level:      raven.FATAL,
-			ServerName: s.GetHostname(),
+			ServerName: hostname,
 			Interfaces: []raven.Interface{
 				// ignore 2 stack frames:
 				// - the frame for ConsumePanic itself
@@ -37,7 +37,7 @@ func ConsumePanic(s VeneurServer, err interface{}) {
 			p.Message = fmt.Sprintf("%#v", e)
 		}
 
-		_, ch := s.GetSentry().Capture(&p, nil)
+		_, ch := sentry.Capture(&p, nil)
 		// we don't want the program to terminate before reporting to sentry
 		<-ch
 	}

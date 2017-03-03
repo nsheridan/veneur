@@ -46,12 +46,12 @@ var log = logrus.New()
 
 var tracer = trace.GlobalTracer
 
-type VeneurServer interface {
-	GetSentry() *raven.Client
-	GetHostname() string
-	GetStats() *statsd.Client
-	GetHTTPClient() *http.Client
-}
+// type VeneurServer interface {
+// 	Sentry() *raven.Client
+// 	Hostname() string
+// 	Stats() *statsd.Client
+// 	HTTPClient() *http.Client
+// }
 
 // A Server is the actual veneur instance that will be run.
 type Server struct {
@@ -60,7 +60,7 @@ type Server struct {
 	TraceWorker *TraceWorker
 
 	statsd *statsd.Client
-	sentry *raven.Client
+	Sentry *raven.Client
 
 	Hostname string
 	Tags     []string
@@ -142,7 +142,7 @@ func NewFromConfig(conf Config, transport http.RoundTripper) (ret Server, err er
 	// nil is a valid sentry client that noops all methods, if there is no DSN
 	// we can just leave it as nil
 	if conf.SentryDsn != "" {
-		ret.sentry, err = raven.New(conf.SentryDsn)
+		ret.Sentry, err = raven.New(conf.SentryDsn)
 		if err != nil {
 			return
 		}
@@ -157,7 +157,7 @@ func NewFromConfig(conf Config, transport http.RoundTripper) (ret Server, err er
 	}
 
 	log.Hooks.Add(sentryHook{
-		c:        ret.sentry,
+		c:        ret.Sentry,
 		hostname: ret.Hostname,
 		lv: []logrus.Level{
 			logrus.ErrorLevel,
@@ -177,7 +177,7 @@ func NewFromConfig(conf Config, transport http.RoundTripper) (ret Server, err er
 		// do not close over loop index
 		go func(w *Worker) {
 			defer func() {
-				ConsumePanic(ret, recover())
+				ConsumePanic(ret.Sentry, ret.Hostname, recover())
 			}()
 			w.Work()
 		}(ret.Workers[i])
@@ -304,22 +304,6 @@ func NewFromConfig(conf Config, transport http.RoundTripper) (ret Server, err er
 	return
 }
 
-func (s Server) GetHostname() string {
-	return s.Hostname
-}
-
-func (s Server) GetSentry() *raven.Client {
-	return s.sentry
-}
-
-func (s Server) GetStats() *statsd.Client {
-	return s.statsd
-}
-
-func (s Server) GetHTTPClient() *http.Client {
-	return s.HTTPClient
-}
-
 // Start spins up the Server to do actual work, firing off goroutines for
 // various workers and utilities.
 func (s *Server) Start() {
@@ -328,7 +312,7 @@ func (s *Server) Start() {
 	go func() {
 		log.Info("Starting Event worker")
 		defer func() {
-			ConsumePanic(s, recover())
+			ConsumePanic(s.Sentry, s.Hostname, recover())
 		}()
 		s.EventWorker.Work()
 	}()
@@ -337,7 +321,7 @@ func (s *Server) Start() {
 		log.Info("Starting Trace worker")
 		go func() {
 			defer func() {
-				ConsumePanic(s, recover())
+				ConsumePanic(s.Sentry, s.Hostname, recover())
 			}()
 			s.TraceWorker.Work()
 		}()
@@ -359,7 +343,7 @@ func (s *Server) Start() {
 	for i := 0; i < s.numReaders; i++ {
 		go func() {
 			defer func() {
-				ConsumePanic(s, recover())
+				ConsumePanic(s.Sentry, s.Hostname, recover())
 			}()
 			s.ReadMetricSocket(packetPool, s.numReaders != 1)
 		}()
@@ -387,7 +371,7 @@ func (s *Server) Start() {
 	// Read Traces Forever!
 	go func() {
 		defer func() {
-			ConsumePanic(s, recover())
+			ConsumePanic(s.Sentry, s.Hostname, recover())
 		}()
 		if s.TraceAddr != nil {
 			// If we ever use multiple readers, pass in the appropriate reuseport option
@@ -400,7 +384,7 @@ func (s *Server) Start() {
 	// Flush every Interval forever!
 	go func() {
 		defer func() {
-			ConsumePanic(s, recover())
+			ConsumePanic(s.Sentry, s.Hostname, recover())
 		}()
 		ticker := time.NewTicker(s.interval)
 		for range ticker.C {

@@ -27,9 +27,9 @@ func NewConsul(config *api.Config) (*Consul, error) {
 	}, nil
 }
 
-// UpdateDestinations updates the list of destinations based on healthy nodes
+// GetDestinationsForService updates the list of destinations based on healthy nodes
 // found via Consul.
-func (c *Consul) UpdateDestinations(serviceName string) ([]string, error) {
+func (c *Consul) GetDestinationsForService(serviceName string) ([]string, error) {
 	serviceEntries, _, err := c.ConsulHealth.Service(serviceName, "", true, &api.QueryOptions{})
 	if err != nil {
 		return nil, err

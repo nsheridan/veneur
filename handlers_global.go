@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"time"
 
+	"github.com/DataDog/datadog-go/statsd"
 	"github.com/stripe/veneur/samplers"
 	"github.com/stripe/veneur/trace"
 )
@@ -24,7 +25,7 @@ func (ch contextHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func handleProxy(p *Proxy) http.Handler {
 	return contextHandler(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
-		span, jsonMetrics, err := handleRequest(ctx, p, w, r)
+		span, jsonMetrics, err := handleRequest(ctx, p.statsd, w, r)
 		// TODO Do something!
 		if err != nil {
 			return
@@ -37,7 +38,7 @@ func handleProxy(p *Proxy) http.Handler {
 
 func handleSpans(p *Proxy) http.Handler {
 	return contextHandler(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
-		span, traces, err := handleTraceRequest(ctx, p, w, r)
+		span, traces, err := handleTraceRequest(ctx, p.statsd, w, r)
 
 		if err != nil {
 			return
@@ -52,7 +53,7 @@ func handleSpans(p *Proxy) http.Handler {
 // metrics to the global veneur instance.
 func handleImport(s *Server) http.Handler {
 	return contextHandler(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
-		span, jsonMetrics, err := handleRequest(ctx, s, w, r)
+		span, jsonMetrics, err := handleRequest(ctx, s.statsd, w, r)
 		// TODO Do something!
 		if err != nil {
 			return
@@ -63,7 +64,7 @@ func handleImport(s *Server) http.Handler {
 	})
 }
 
-func handleTraceRequest(ctx context.Context, s VeneurServer, w http.ResponseWriter, r *http.Request) (*trace.Span, []DatadogTraceSpan, error) {
+func handleTraceRequest(ctx context.Context, stats *statsd.Client, w http.ResponseWriter, r *http.Request) (*trace.Span, []DatadogTraceSpan, error) {
 	var (
 		traces []DatadogTraceSpan
 		err    error
@@ -85,7 +86,7 @@ func handleTraceRequest(ctx context.Context, s VeneurServer, w http.ResponseWrit
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		span.Error(err)
 		innerLogger.WithError(err).Error("Could not decode /spans request")
-		s.GetStats().Count("import.request_error_total", 1, []string{"cause:json"}, 1.0)
+		stats.Count("import.request_error_total", 1, []string{"cause:json"}, 1.0)
 		return nil, nil, err
 	}
 
@@ -98,7 +99,7 @@ func handleTraceRequest(ctx context.Context, s VeneurServer, w http.ResponseWrit
 	}
 
 	w.WriteHeader(http.StatusAccepted)
-	s.GetStats().TimeInMilliseconds("spans.response_duration_ns",
+	stats.TimeInMilliseconds("spans.response_duration_ns",
 		float64(time.Since(span.Start).Nanoseconds()),
 		[]string{"part:request"},
 		1.0)
@@ -106,7 +107,7 @@ func handleTraceRequest(ctx context.Context, s VeneurServer, w http.ResponseWrit
 	return span, traces, nil
 }
 
-func handleRequest(ctx context.Context, s VeneurServer, w http.ResponseWriter, r *http.Request) (*trace.Span, []samplers.JSONMetric, error) {
+func handleRequest(ctx context.Context, stats *statsd.Client, w http.ResponseWriter, r *http.Request) (*trace.Span, []samplers.JSONMetric, error) {
 	var (
 		jsonMetrics []samplers.JSONMetric
 		body        io.ReadCloser
@@ -136,7 +137,7 @@ func handleRequest(ctx context.Context, s VeneurServer, w http.ResponseWriter, r
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			span.Error(err)
 			encLogger.WithError(err).Error("Could not read compressed request body")
-			s.GetStats().Count("import.request_error_total", 1, []string{"cause:deflate"}, 1.0)
+			stats.Count("import.request_error_total", 1, []string{"cause:deflate"}, 1.0)
 			return nil, nil, err
 		}
 		defer body.Close()
@@ -144,7 +145,7 @@ func handleRequest(ctx context.Context, s VeneurServer, w http.ResponseWriter, r
 		http.Error(w, encoding, http.StatusUnsupportedMediaType)
 		span.Error(errors.New("Could not determine content-encoding of request"))
 		encLogger.Error("Could not determine content-encoding of request")
-		s.GetStats().Count("import.request_error_total", 1, []string{"cause:unknown_content_encoding"}, 1.0)
+		stats.Count("import.request_error_total", 1, []string{"cause:unknown_content_encoding"}, 1.0)
 		return nil, nil, err
 	}
 
@@ -152,7 +153,7 @@ func handleRequest(ctx context.Context, s VeneurServer, w http.ResponseWriter, r
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		span.Error(err)
 		innerLogger.WithError(err).Error("Could not decode /import request")
-		s.GetStats().Count("import.request_error_total", 1, []string{"cause:json"}, 1.0)
+		stats.Count("import.request_error_total", 1, []string{"cause:json"}, 1.0)
 		return nil, nil, err
 	}
 
@@ -178,7 +179,7 @@ func handleRequest(ctx context.Context, s VeneurServer, w http.ResponseWriter, r
 	}
 
 	w.WriteHeader(http.StatusAccepted)
-	s.GetStats().TimeInMilliseconds("import.response_duration_ns",
+	stats.TimeInMilliseconds("import.response_duration_ns",
 		float64(time.Since(span.Start).Nanoseconds()),
 		[]string{"part:request", fmt.Sprintf("encoding:%s", encoding)},
 		1.0)

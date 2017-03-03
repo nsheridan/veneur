@@ -29,9 +29,7 @@ import (
 )
 
 type Proxy struct {
-	statsd *statsd.Client
-	sentry *raven.Client
-
+	Sentry                 *raven.Client
 	Hostname               string
 	ForwardDestinations    *consistent.Consistent
 	TraceDestinations      *consistent.Consistent
@@ -45,19 +43,20 @@ type Proxy struct {
 	HTTPClient             *http.Client
 
 	enableProfiling bool
+	statsd          *statsd.Client
 }
 
-func NewProxyFromConfig(conf ProxyConfig) (ret Proxy, err error) {
+func NewProxyFromConfig(conf ProxyConfig) (p Proxy, err error) {
 
 	hostname, err := os.Hostname()
 	if err != nil {
 		log.WithError(err).Error("Error finding hostname")
 		return
 	}
-	ret.Hostname = hostname
+	p.Hostname = hostname
 
 	log.Hooks.Add(sentryHook{
-		c:        ret.sentry,
+		c:        p.Sentry,
 		hostname: hostname,
 		lv: []logrus.Level{
 			logrus.ErrorLevel,
@@ -66,19 +65,19 @@ func NewProxyFromConfig(conf ProxyConfig) (ret Proxy, err error) {
 		},
 	})
 
-	ret.HTTPAddr = conf.HTTPAddress
+	p.HTTPAddr = conf.HTTPAddress
 	// TODO Timeout?
-	ret.HTTPClient = &http.Client{}
+	p.HTTPClient = &http.Client{}
 
-	ret.enableProfiling = conf.EnableProfiling
+	p.enableProfiling = conf.EnableProfiling
 
-	ret.ConsulForwardService = conf.ConsulForwardServiceName
-	ret.ConsulTraceService = conf.ConsulTraceServiceName
+	p.ConsulForwardService = conf.ConsulForwardServiceName
+	p.ConsulTraceService = conf.ConsulTraceServiceName
 
-	ret.ForwardDestinations = consistent.New()
-	ret.TraceDestinations = consistent.New()
+	p.ForwardDestinations = consistent.New()
+	p.TraceDestinations = consistent.New()
 
-	ret.ConsulInterval, err = time.ParseDuration(conf.ConsulRefreshInterval)
+	p.ConsulInterval, err = time.ParseDuration(conf.ConsulRefreshInterval)
 	if err != nil {
 		log.WithError(err).Error("Error parsing Consul refresh interval")
 		return
@@ -91,22 +90,8 @@ func NewProxyFromConfig(conf ProxyConfig) (ret Proxy, err error) {
 	return
 }
 
-func (p Proxy) GetHostname() string {
-	return p.Hostname
-}
-
-func (p Proxy) GetSentry() *raven.Client {
-	return p.sentry
-}
-
-func (p Proxy) GetStats() *statsd.Client {
-	return p.statsd
-}
-
-func (p Proxy) GetHTTPClient() *http.Client {
-	return p.HTTPClient
-}
-
+// Start fires up the various goroutines that run on behalf of the server.
+// This is separated from the constructor for testing convenience.
 func (p *Proxy) Start() {
 	log.WithField("version", VERSION).Info("Starting server")
 
@@ -134,7 +119,7 @@ func (p *Proxy) Start() {
 
 	go func() {
 		defer func() {
-			ConsumePanic(p, recover())
+			ConsumePanic(p.Sentry, p.Hostname, recover())
 		}()
 		ticker := time.NewTicker(p.ConsulInterval)
 		for range ticker.C {
@@ -199,7 +184,7 @@ func (p *Proxy) HTTPServe() {
 func (p *Proxy) RefreshDestinations(serviceName string, ring *consistent.Consistent, mtx *sync.Mutex) {
 
 	start := time.Now()
-	destinations, err := p.Discoverer.UpdateDestinations(serviceName)
+	destinations, err := p.Discoverer.GetDestinationsForService(serviceName)
 	p.statsd.TimeInMilliseconds("discoverer.update_duration_ns", float64(time.Since(start).Nanoseconds()), []string{fmt.Sprintf("service:%s", serviceName)}, 1.0)
 	if err != nil || len(destinations) == 0 {
 		log.WithError(err).Error("Discoverer returned an error, destinations may be stale!")
@@ -261,15 +246,15 @@ func (p *Proxy) ProxyTraces(ctx context.Context, traces []DatadogTraceSpan) {
 			if err != nil {
 				// not a fatal error if we fail
 				// we'll just try to use the host as it was given to us
-				p.GetStats().Count("spans.error_total", 1, []string{"cause:dns"}, 1.0)
+				p.statsd.Count("spans.error_total", 1, []string{"cause:dns"}, 1.0)
 				log.WithError(err).Warn("Could not re-resolve host for spans")
 			}
-			p.GetStats().TimeInMilliseconds("spans.duration_ns", float64(time.Since(dnsStart).Nanoseconds()), []string{"part:dns"}, 1.0)
+			p.statsd.TimeInMilliseconds("spans.duration_ns", float64(time.Since(dnsStart).Nanoseconds()), []string{"part:dns"}, 1.0)
 
 			// this endpoint is not documented to take an array... but it does
 			// another curious constraint of this endpoint is that it does not
 			// support "Content-Encoding: deflate"
-			err = postHelper(span.Attach(ctx), p, endpoint, batch, "flush_traces", false)
+			err = postHelper(span.Attach(ctx), p.HTTPClient, p.statsd, endpoint, batch, "flush_traces", false)
 
 			if err == nil {
 				log.WithFields(logrus.Fields{
@@ -312,14 +297,14 @@ func (p *Proxy) ProxyMetrics(ctx context.Context, jsonMetrics []samplers.JSONMet
 		if err != nil {
 			// not a fatal error if we fail
 			// we'll just try to use the host as it was given to us
-			p.GetStats().Count("forward.error_total", 1, []string{"cause:dns"}, 1.0)
+			p.statsd.Count("forward.error_total", 1, []string{"cause:dns"}, 1.0)
 			log.WithError(err).Warn("Could not re-resolve host for forward")
 		}
-		p.GetStats().TimeInMilliseconds("forward.duration_ns", float64(time.Since(dnsStart).Nanoseconds()), []string{"part:dns"}, 1.0)
+		p.statsd.TimeInMilliseconds("forward.duration_ns", float64(time.Since(dnsStart).Nanoseconds()), []string{"part:dns"}, 1.0)
 
 		// the error has already been logged (if there was one), so we only care
 		// about the success case
-		if postHelper(context.TODO(), p, endpoint, batch, "forward", true) == nil {
+		if postHelper(context.TODO(), p.HTTPClient, p.statsd, endpoint, batch, "forward", true) == nil {
 			log.WithField("metrics", len(batch)).Info("Completed forward to upstream Veneur")
 		}
 	}

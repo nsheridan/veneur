@@ -11,7 +11,7 @@ import (
 
 const defaultBufferSizeBytes = 1048576 * 2 // 2 MB
 
-// ReadProxyConfig unmarshals the proxy config file and slurps in it's data.
+// ReadProxyConfig unmarshals the proxy config file and slurps in its data.
 func ReadProxyConfig(path string) (c ProxyConfig, err error) {
 	f, err := os.Open(path)
 	if err != nil {
